@@ -23,6 +23,7 @@ type
     procedure TestPamSubsystemAvailability();
     procedure TestPamAuthenticationFailureWithNonExistentUser();
     procedure TestPamPutEnvWithoutSession();
+    procedure TestPamStartSessionWithoutRootGraceful();
   end;
 
 implementation
@@ -65,6 +66,20 @@ procedure TDmPamTest.TestPamPutEnvWithoutSession();
 begin
   // PutEnv on nil handle should safely return False without crashing
   AssertFalse('PutEnv on inactive PAM transaction should return False', FPam.PutEnv('TEST=1'));
+end;
+
+procedure TDmPamTest.TestPamStartSessionWithoutRootGraceful();
+var
+  errMsg: string;
+  ok: Boolean;
+begin
+  if not FPam.Available then Exit;
+
+  errMsg := '';
+  // Running unit tests without root will fail pam_open_session gracefully
+  ok := FPam.StartSession('non_existent_dmsama_user_99999', errMsg);
+  AssertFalse('StartSession with non-existent user or without root must fail gracefully', ok);
+  AssertTrue('Error message must be populated', Length(errMsg) > 0);
 end;
 
 initialization

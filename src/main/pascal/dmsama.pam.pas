@@ -93,6 +93,7 @@ type
     destructor Destroy(); override;
 
     function Authenticate(const AUsername, APassword: string; out AErrorMsg: string): Boolean;
+    function StartSession(const AUsername: string; out AErrorMsg: string): Boolean;
     function OpenSession(out AErrorMsg: string): Boolean;
     function CloseSession(): Boolean;
     function PutEnv(const ANameValue: string): Boolean;
@@ -108,6 +109,7 @@ implementation
 
 function malloc(size: csize_t): Pointer; cdecl; external 'c';
 function strdup(const s: PChar): PChar; cdecl; external 'c';
+function getpwnam(name: PChar): Pointer; cdecl; external 'c' name 'getpwnam';
 
 function DmPamConversation(num_msg: cint; msg: PPPamMessage; var resp: PPamResponse; appdata_ptr: Pointer): cint; cdecl;
 var
@@ -252,6 +254,60 @@ begin
   end;
 
   Result := True;
+end;
+
+function TDmPam.StartSession(const AUsername: string; out AErrorMsg: string): Boolean;
+var
+  conv: TPamConv;
+  rc: cint;
+  svcToTry: string;
+begin
+  Result := False;
+  AErrorMsg := '';
+  FUsername := AUsername;
+
+  if (AUsername = '') or (getpwnam(PChar(AUsername)) = nil) then
+  begin
+    AErrorMsg := 'User not found: ' + AUsername;
+    Exit;
+  end;
+
+  if not FAvailable then
+  begin
+    AErrorMsg := 'PAM library not available';
+    Exit;
+  end;
+
+  if FPamh <> nil then
+  begin
+    CloseSession();
+    Fpam_end(FPamh, PAM_SUCCESS);
+    FPamh := nil;
+  end;
+
+  conv.conv := @DmPamConversation;
+  conv.appdata_ptr := nil;
+
+  svcToTry := FServiceName;
+  rc := Fpam_start(PChar(svcToTry), PChar(AUsername), @conv, FPamh);
+  if (rc <> PAM_SUCCESS) and (svcToTry <> 'other') then
+  begin
+    svcToTry := 'login';
+    rc := Fpam_start(PChar(svcToTry), PChar(AUsername), @conv, FPamh);
+    if rc <> PAM_SUCCESS then
+    begin
+      svcToTry := 'other';
+      rc := Fpam_start(PChar(svcToTry), PChar(AUsername), @conv, FPamh);
+    end;
+  end;
+
+  if rc <> PAM_SUCCESS then
+  begin
+    AErrorMsg := 'pam_start error: ' + string(Fpam_strerror(FPamh, rc));
+    Exit;
+  end;
+
+  Result := OpenSession(AErrorMsg);
 end;
 
 function TDmPam.OpenSession(out AErrorMsg: string): Boolean;

@@ -27,11 +27,21 @@ var
   authPath   : string;
   sessions   : TSessionInfoArray;
   gTerminated: Boolean = False;
-  greeterPid : pid_t = -1;
-  status     : cint = 0;
-  pwGreeter  : PPasswd;
+  greeterPid     : pid_t = -1;
+  status         : cint = 0;
+  pwGreeter      : PPasswd;
+  targetFile     : string;
+  targetUser     : string;
+  targetSession  : string;
+  sessionExec    : string;
+  pamErr         : string;
+  userSessionPid : pid_t = -1;
+  pwUser         : PPasswd;
+  sessLines      : TStringList;
+  pamEnv         : TStringList;
 
 function chown(path: PChar; owner: uid_t; group: gid_t): cint; cdecl; external 'c' name 'chown';
+function chmod(path: PChar; mode: mode_t): cint; cdecl; external 'c' name 'chmod';
 function getpwnam(name: PChar): PPasswd; cdecl; external 'c' name 'getpwnam';
 
 procedure SignalHandler(sig: cint); cdecl;
@@ -224,12 +234,17 @@ begin
         end;
         WriteLn('X server ready on display ', Config.Display);
 
-        // Adjust authority file permissions for greeter user
+        // Adjust authority file and directory permissions for greeter user
         if Config.GreeterUser <> '' then
         begin
           pwGreeter := getpwnam(PChar(Config.GreeterUser));
           if pwGreeter <> nil then
+          begin
+            chown(PChar(Config.AuthDir), pwGreeter^.pw_uid, pwGreeter^.pw_gid);
+            chmod(PChar(Config.AuthDir), &775);
             chown(PChar(authPath), pwGreeter^.pw_uid, pwGreeter^.pw_gid);
+            chmod(PChar(authPath), &600);
+          end;
         end;
 
         // Spawn pre-session greeter
@@ -245,9 +260,99 @@ begin
             begin
               WriteLn('Greeter process (PID: ', greeterPid, ') exited with code ', status);
               greeterPid := -1;
-              if not gTerminated then
+
+              // Check for successful authentication handoff target
+              targetFile := IncludeTrailingPathDelimiter(Config.AuthDir) + 'session.target';
+              if not FileExists(targetFile) then
+                targetFile := '/tmp/dmsama-session.target';
+
+              if FileExists(targetFile) then
               begin
-                Sleep(1000);
+                targetUser := '';
+                targetSession := '';
+                sessLines := TStringList.Create();
+                try
+                  sessLines.LoadFromFile(targetFile);
+                  targetUser := sessLines.Values['user'];
+                  targetSession := sessLines.Values['session'];
+                finally
+                  sessLines.Free();
+                  DeleteFile(targetFile);
+                end;
+
+                if targetUser <> '' then
+                begin
+                  WriteLn('Starting user session for user: ', targetUser, ' (session: ', targetSession, ')');
+
+                  if targetSession = '' then
+                    targetSession := Config.DefaultSession;
+                  sessionExec := TDmSessionManager.ResolveSessionExec(targetSession, Config.SessionsDir);
+                  WriteLn('Resolved session command: ', sessionExec);
+
+                  // Re-chown authority file to target user
+                  pwUser := getpwnam(PChar(targetUser));
+                  if pwUser <> nil then
+                  begin
+                    chown(PChar(authPath), pwUser^.pw_uid, pwUser^.pw_gid);
+                    chmod(PChar(authPath), &600);
+                  end;
+
+                  // Open PAM session
+                  PamSession := TDmPam.Create('dmsama');
+                  pamEnv := nil;
+                  try
+                    pamErr := '';
+                    if PamSession.StartSession(targetUser, pamErr) then
+                    begin
+                      WriteLn('PAM session opened successfully for ', targetUser);
+                      pamEnv := PamSession.GetEnvList();
+                    end
+                    else
+                      WriteLn(StdErr, 'Warning: PAM session open failed: ', pamErr);
+
+                    userSessionPid := TDmSessionManager.SpawnUserSession(targetUser, sessionExec, Config.Display, authPath, pamEnv);
+                    WriteLn('Spawned user session process (PID: ', userSessionPid, ')');
+
+                    // Monitor user session until it terminates
+                    while not gTerminated and XServer.IsRunning and (userSessionPid > 0) do
+                    begin
+                      if fpWaitPID(userSessionPid, status, WNOHANG) = userSessionPid then
+                      begin
+                        WriteLn('User session (PID: ', userSessionPid, ') exited with code ', status);
+                        userSessionPid := -1;
+                        Break;
+                      end;
+                      Sleep(200);
+                    end;
+
+                    if PamSession.SessionOpen then
+                    begin
+                      PamSession.CloseSession();
+                      WriteLn('Closed PAM session for ', targetUser);
+                    end;
+                  finally
+                    if Assigned(pamEnv) then
+                      pamEnv.Free();
+                    PamSession.Free();
+                    PamSession := nil;
+                  end;
+
+                  // Re-chown authority file back to greeter user
+                  if Config.GreeterUser <> '' then
+                  begin
+                    pwGreeter := getpwnam(PChar(Config.GreeterUser));
+                    if pwGreeter <> nil then
+                    begin
+                      chown(PChar(authPath), pwGreeter^.pw_uid, pwGreeter^.pw_gid);
+                      chmod(PChar(authPath), &600);
+                    end;
+                  end;
+                end;
+              end;
+
+              if not gTerminated and XServer.IsRunning then
+              begin
+                Sleep(500);
                 greeterPid := TDmSessionManager.SpawnGreeter(Config.GreeterCmd, Config.GreeterUser, Config.Display, authPath);
                 WriteLn('Respawned greeter process (PID: ', greeterPid, ')');
               end;
@@ -257,6 +362,11 @@ begin
         end;
 
         WriteLn('dmsama shutting down...');
+        if userSessionPid > 0 then
+        begin
+          fpKill(userSessionPid, SIGTERM);
+          fpWaitPID(userSessionPid, status, 0);
+        end;
         if greeterPid > 0 then
         begin
           fpKill(greeterPid, SIGTERM);

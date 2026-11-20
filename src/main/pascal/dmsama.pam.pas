@@ -75,6 +75,10 @@ type
     FCredEstablished  : Boolean;
     FServiceName      : string;
     FUsername         : string;
+    FSeat             : string;
+    FSessionType      : string;
+    FSessionClass     : string;
+    FVT               : Integer;
 
     Fpam_start        : function(service_name: PChar; user: PChar; pam_conversation: PPamConv; out pamh: PPamHandle): cint; cdecl;
     Fpam_authenticate : function(pamh: PPamHandle; flags: cint): cint; cdecl;
@@ -103,6 +107,10 @@ type
     property SessionOpen: Boolean read FSessionOpen;
     property ServiceName: string read FServiceName write FServiceName;
     property Username: string read FUsername;
+    property Seat: string read FSeat write FSeat;
+    property SessionType: string read FSessionType write FSessionType;
+    property SessionClass: string read FSessionClass write FSessionClass;
+    property VT: Integer read FVT write FVT;
   end;
 
 implementation
@@ -145,6 +153,10 @@ begin
   FPamh := nil;
   FSessionOpen := False;
   FCredEstablished := False;
+  FSeat := 'seat0';
+  FSessionType := 'x11';
+  FSessionClass := 'user';
+  FVT := 7;
 
   FLibHandle := SafeLoadLibrary('libpam.so.0');
   if FLibHandle = NilHandle then
@@ -317,6 +329,16 @@ begin
   Result := False;
   AErrorMsg := '';
   if FPamh = nil then Exit;
+
+  // Set standard seat and session properties for pam_systemd
+  if FSeat <> '' then
+    PutEnv('XDG_SEAT=' + FSeat);
+  if FSessionType <> '' then
+    PutEnv('XDG_SESSION_TYPE=' + FSessionType);
+  if FSessionClass <> '' then
+    PutEnv('XDG_SESSION_CLASS=' + FSessionClass);
+  if FVT > 0 then
+    PutEnv('XDG_VTNR=' + IntToStr(FVT));
 
   if Assigned(Fpam_setcred) then
   begin

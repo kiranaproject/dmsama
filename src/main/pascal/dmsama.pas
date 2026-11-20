@@ -299,6 +299,7 @@ begin
 
                   // Open PAM session
                   PamSession := TDmPam.Create('dmsama');
+                  PamSession.VT := Config.VT;
                   pamEnv := nil;
                   try
                     pamErr := '';

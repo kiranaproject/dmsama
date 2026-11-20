@@ -1,0 +1,8 @@
+target/
+*.o
+*.ppu
+*.rsj
+*.a
+*.so
+dmsama
+TestRunner

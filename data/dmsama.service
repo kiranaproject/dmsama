@@ -1,0 +1,15 @@
+[Unit]
+Description=Samarinda Display Manager
+Documentation=man:dmsama(8)
+After=systemd-user-sessions.service plymouth-quit-wait.service
+After=getty@tty7.service
+Conflicts=getty@tty7.service
+
+[Service]
+ExecStart=/usr/bin/dmsama
+Restart=always
+RestartSec=1s
+BusName=org.freedesktop.DisplayManager
+
+[Install]
+Alias=display-manager.service

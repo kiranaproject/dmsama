@@ -80,7 +80,7 @@ begin
   else
     FXServerCmd   := 'Xorg';
 
-  FXServerArgs    := '-core -noreset -novtswitch';
+  FXServerArgs    := '-core -noreset';
   FAuthDir        := '/var/run/dmsama';
 end;
 

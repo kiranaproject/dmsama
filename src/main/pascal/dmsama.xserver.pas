@@ -149,6 +149,7 @@ var
   socketPath: string;
   colonPos: Integer;
   startTime: QWord;
+  vtFd: cint;
 begin
   Result := False;
   if not IsRunning then Exit;
@@ -169,6 +170,20 @@ begin
 
     if FileExists(socketPath) then
     begin
+      // Switch active console to X server VT
+      if FVt > 0 then
+      begin
+        vtFd := fpOpen('/dev/console', O_RDWR);
+        if vtFd < 0 then
+          vtFd := fpOpen('/dev/tty0', O_RDWR);
+        if vtFd >= 0 then
+        begin
+          fpIOCtl(vtFd, $5606 { VT_ACTIVATE }, Pointer(PtrInt(FVt)));
+          fpIOCtl(vtFd, $5607 { VT_WAITACTIVE }, Pointer(PtrInt(FVt)));
+          fpClose(vtFd);
+        end;
+      end;
+
       Result := True;
       Exit;
     end;

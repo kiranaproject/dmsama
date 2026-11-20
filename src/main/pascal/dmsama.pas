@@ -27,6 +27,12 @@ var
   authPath   : string;
   sessions   : TSessionInfoArray;
   gTerminated: Boolean = False;
+  greeterPid : pid_t = -1;
+  status     : cint = 0;
+  pwGreeter  : PPasswd;
+
+function chown(path: PChar; owner: uid_t; group: gid_t): cint; cdecl; external 'c' name 'chown';
+function getpwnam(name: PChar): PPasswd; cdecl; external 'c' name 'getpwnam';
 
 procedure SignalHandler(sig: cint); cdecl;
 begin
@@ -218,13 +224,44 @@ begin
         end;
         WriteLn('X server ready on display ', Config.Display);
 
+        // Adjust authority file permissions for greeter user
+        if Config.GreeterUser <> '' then
+        begin
+          pwGreeter := getpwnam(PChar(Config.GreeterUser));
+          if pwGreeter <> nil then
+            chown(PChar(authPath), pwGreeter^.pw_uid, pwGreeter^.pw_gid);
+        end;
+
+        // Spawn pre-session greeter
+        greeterPid := TDmSessionManager.SpawnGreeter(Config.GreeterCmd, Config.GreeterUser, Config.Display, authPath);
+        WriteLn('Spawned greeter process: ', Config.GreeterCmd, ' (PID: ', greeterPid, ')');
+
         // Main daemon loop: spawn greeter and monitor
         while not gTerminated and XServer.IsRunning do
         begin
-          Sleep(500);
+          if greeterPid > 0 then
+          begin
+            if fpWaitPID(greeterPid, status, WNOHANG) = greeterPid then
+            begin
+              WriteLn('Greeter process (PID: ', greeterPid, ') exited with code ', status);
+              greeterPid := -1;
+              if not gTerminated then
+              begin
+                Sleep(1000);
+                greeterPid := TDmSessionManager.SpawnGreeter(Config.GreeterCmd, Config.GreeterUser, Config.Display, authPath);
+                WriteLn('Respawned greeter process (PID: ', greeterPid, ')');
+              end;
+            end;
+          end;
+          Sleep(200);
         end;
 
         WriteLn('dmsama shutting down...');
+        if greeterPid > 0 then
+        begin
+          fpKill(greeterPid, SIGTERM);
+          fpWaitPID(greeterPid, status, 0);
+        end;
       finally
         XServer.Stop();
         XServer.Free();

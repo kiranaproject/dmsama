@@ -4,6 +4,8 @@ Documentation=man:dmsama(8)
 After=systemd-user-sessions.service plymouth-quit-wait.service
 After=getty@tty7.service
 Conflicts=getty@tty7.service
+RequiresMountsFor=/projects
+After=projects.mount
 
 [Service]
 ExecStart=/usr/bin/dmsama

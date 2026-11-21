@@ -124,6 +124,86 @@ begin
   WriteLn('Validation completed successfully.');
 end;
 
+procedure ExecuteUserSession(const ATargetUser, ATargetSession: string);
+var
+  sessExec: string;
+  pUser: PPasswd;
+  pGreeter: PPasswd;
+  pam: TDmPam;
+  pEnv: TStringList;
+  pErr: string;
+  uPid: pid_t;
+  uStatus: cint;
+  resolvedSession: string;
+begin
+  resolvedSession := ATargetSession;
+  if resolvedSession = '' then
+    resolvedSession := Config.DefaultSession;
+  sessExec := TDmSessionManager.ResolveSessionExec(resolvedSession, Config.SessionsDir);
+  WriteLn('Starting user session for user: ', ATargetUser, ' (session: ', resolvedSession, ')');
+  WriteLn('Resolved session command: ', sessExec);
+
+  // Re-chown authority file to target user
+  pUser := getpwnam(PChar(ATargetUser));
+  if pUser <> nil then
+  begin
+    chown(PChar(authPath), pUser^.pw_uid, pUser^.pw_gid);
+    chmod(PChar(authPath), &600);
+  end;
+
+  // Open PAM session
+  pam := TDmPam.Create('dmsama');
+  pam.VT := Config.VT;
+  pEnv := nil;
+  try
+    pErr := '';
+    if pam.StartSession(ATargetUser, pErr) then
+    begin
+      WriteLn('PAM session opened successfully for ', ATargetUser);
+      pEnv := pam.GetEnvList();
+    end
+    else
+      WriteLn(StdErr, 'Warning: PAM session open failed: ', pErr);
+
+    uPid := TDmSessionManager.SpawnUserSession(ATargetUser, sessExec, Config.Display, authPath, pEnv);
+    userSessionPid := uPid;
+    WriteLn('Spawned user session process (PID: ', uPid, ')');
+
+    // Monitor user session until it terminates
+    while not gTerminated and XServer.IsRunning and (userSessionPid > 0) do
+    begin
+      if fpWaitPID(userSessionPid, uStatus, WNOHANG) = userSessionPid then
+      begin
+        WriteLn('User session (PID: ', userSessionPid, ') exited with code ', uStatus);
+        userSessionPid := -1;
+        Break;
+      end;
+      Sleep(200);
+    end;
+
+    if pam.SessionOpen then
+    begin
+      pam.CloseSession();
+      WriteLn('Closed PAM session for ', ATargetUser);
+    end;
+  finally
+    if Assigned(pEnv) then
+      pEnv.Free();
+    pam.Free();
+  end;
+
+  // Re-chown authority file back to greeter user
+  if Config.GreeterUser <> '' then
+  begin
+    pGreeter := getpwnam(PChar(Config.GreeterUser));
+    if pGreeter <> nil then
+    begin
+      chown(PChar(authPath), pGreeter^.pw_uid, pGreeter^.pw_gid);
+      chmod(PChar(authPath), &600);
+    end;
+  end;
+end;
+
 begin
   TestMode := False;
   ConfigPath := '/etc/dmsama/dmsama.conf';
@@ -247,9 +327,20 @@ begin
           end;
         end;
 
-        // Spawn pre-session greeter
-        greeterPid := TDmSessionManager.SpawnGreeter(Config.GreeterCmd, Config.GreeterUser, Config.Display, authPath);
-        WriteLn('Spawned greeter process: ', Config.GreeterCmd, ' (PID: ', greeterPid, ')');
+        // Check for automatic login
+        if Config.AutoLogin and (Config.AutoLoginUser <> '') then
+        begin
+          WriteLn('Automatic login active for user: ', Config.AutoLoginUser);
+          ExecuteUserSession(Config.AutoLoginUser, Config.DefaultSession);
+          Config.AutoLogin := False; // Clear after initial login so logout returns to greeter
+        end;
+
+        // Spawn pre-session greeter if user session is not running
+        if not gTerminated and XServer.IsRunning and (userSessionPid <= 0) then
+        begin
+          greeterPid := TDmSessionManager.SpawnGreeter(Config.GreeterCmd, Config.GreeterUser, Config.Display, authPath);
+          WriteLn('Spawned greeter process: ', Config.GreeterCmd, ' (PID: ', greeterPid, ')');
+        end;
 
         // Main daemon loop: spawn greeter and monitor
         while not gTerminated and XServer.IsRunning do
@@ -281,77 +372,10 @@ begin
                 end;
 
                 if targetUser <> '' then
-                begin
-                  WriteLn('Starting user session for user: ', targetUser, ' (session: ', targetSession, ')');
-
-                  if targetSession = '' then
-                    targetSession := Config.DefaultSession;
-                  sessionExec := TDmSessionManager.ResolveSessionExec(targetSession, Config.SessionsDir);
-                  WriteLn('Resolved session command: ', sessionExec);
-
-                  // Re-chown authority file to target user
-                  pwUser := getpwnam(PChar(targetUser));
-                  if pwUser <> nil then
-                  begin
-                    chown(PChar(authPath), pwUser^.pw_uid, pwUser^.pw_gid);
-                    chmod(PChar(authPath), &600);
-                  end;
-
-                  // Open PAM session
-                  PamSession := TDmPam.Create('dmsama');
-                  PamSession.VT := Config.VT;
-                  pamEnv := nil;
-                  try
-                    pamErr := '';
-                    if PamSession.StartSession(targetUser, pamErr) then
-                    begin
-                      WriteLn('PAM session opened successfully for ', targetUser);
-                      pamEnv := PamSession.GetEnvList();
-                    end
-                    else
-                      WriteLn(StdErr, 'Warning: PAM session open failed: ', pamErr);
-
-                    userSessionPid := TDmSessionManager.SpawnUserSession(targetUser, sessionExec, Config.Display, authPath, pamEnv);
-                    WriteLn('Spawned user session process (PID: ', userSessionPid, ')');
-
-                    // Monitor user session until it terminates
-                    while not gTerminated and XServer.IsRunning and (userSessionPid > 0) do
-                    begin
-                      if fpWaitPID(userSessionPid, status, WNOHANG) = userSessionPid then
-                      begin
-                        WriteLn('User session (PID: ', userSessionPid, ') exited with code ', status);
-                        userSessionPid := -1;
-                        Break;
-                      end;
-                      Sleep(200);
-                    end;
-
-                    if PamSession.SessionOpen then
-                    begin
-                      PamSession.CloseSession();
-                      WriteLn('Closed PAM session for ', targetUser);
-                    end;
-                  finally
-                    if Assigned(pamEnv) then
-                      pamEnv.Free();
-                    PamSession.Free();
-                    PamSession := nil;
-                  end;
-
-                  // Re-chown authority file back to greeter user
-                  if Config.GreeterUser <> '' then
-                  begin
-                    pwGreeter := getpwnam(PChar(Config.GreeterUser));
-                    if pwGreeter <> nil then
-                    begin
-                      chown(PChar(authPath), pwGreeter^.pw_uid, pwGreeter^.pw_gid);
-                      chmod(PChar(authPath), &600);
-                    end;
-                  end;
-                end;
+                  ExecuteUserSession(targetUser, targetSession);
               end;
 
-              if not gTerminated and XServer.IsRunning then
+              if not gTerminated and XServer.IsRunning and (userSessionPid <= 0) then
               begin
                 Sleep(500);
                 greeterPid := TDmSessionManager.SpawnGreeter(Config.GreeterCmd, Config.GreeterUser, Config.Display, authPath);
